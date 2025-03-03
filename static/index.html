@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inventory Management Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .status-pending { color: orange; }
+        .status-processing { color: blue; }
+        .status-completed { color: green; }
+        .order-type-automatic { border-left: 4px solid #ffc107; }
+        .order-type-scheduled { border-left: 4px solid #17a2b8; }
+        .order-type-manual { border-left: 4px solid #28a745; }
+        .order-card {
+            transition: all 0.3s ease;
+            margin-bottom: 15px;
+        }
+        .order-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+        #cameraFeed {
+            width: 100%;
+            height: 100%;
+            min-height: 300px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #f8f9fa;
+            border-radius: 4px;
+            overflow: hidden;
+            position: relative;
+        }
+        #cameraFeed img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        #cameraError {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            display: none;
+        }
+        .retry-button {
+            margin-top: 10px;
+            padding: 5px 15px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .retry-button:hover {
+            background-color: #0056b3;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0.5; }
+            to { opacity: 1; }
+        }
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.02); }
+            100% { transform: scale(1); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-5">
+        <h1 class="mb-4">Inventory Management Dashboard</h1>
+        
+        <div class="row">
+            <!-- Live Camera Feed -->
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">Live Detection</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="cameraFeed">
+                            <img src="/video_feed" alt="Live Camera Feed" onerror="handleCameraError()">
+                            <div id="cameraError">
+                                <p>❌ Camera feed unavailable</p>
+                                <button class="retry-button" onclick="retryCamera()">Retry Connection</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Current Inventory -->
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">Current Inventory</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="inventoryList" class="list-group">
+                            <!-- Inventory items will be added here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Recent Orders -->
+        <div class="row mt-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">Recent Orders</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="ordersList" class="row">
+                            <!-- Orders will be added here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Add retry logic for fetch requests
+        async function fetchWithRetry(url, options = {}, maxRetries = 3) {
+            let lastError;
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    const data = await response.json();
+                    
+                    if (!response.ok) {
+                        throw new Error(data.detail || `HTTP error! status: ${response.status}`);
+                    }
+                    return data;
+                } catch (error) {
+                    console.warn(`Attempt ${i + 1} failed:`, error);
+                    lastError = error;
+                    if (i === maxRetries - 1) throw error;
+                    await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+                }
+            }
+            throw lastError;
+        }
+
+        // Fetch current inventory with retry
+        async function loadInitialInventory() {
+            try {
+                const inventory = await fetchWithRetry('/inventory');
+                Object.entries(inventory).forEach(([item_name, data]) => {
+                    updateInventory({
+                        item_name: item_name,
+                        ...data
+                    });
+                });
+            } catch (error) {
+                console.error('Failed to load initial inventory:', error);
+                showError('Failed to load inventory. Please try again.', 'inventoryList');
+            }
+        }
+
+        // Fetch existing orders with retry
+        async function loadInitialOrders() {
+            try {
+                const orders = await fetchWithRetry('/orders');
+                orders.forEach(order => updateOrders(order));
+            } catch (error) {
+                console.error('Failed to load orders:', error);
+                showError('Failed to load orders. Please try again.', 'ordersList');
+            }
+        }
+
+        // Place order function
+        async function placeOrder(itemName, quantity = 1) {
+            try {
+                const response = await fetchWithRetry('/place_order', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        item_name: itemName,
+                        quantity: quantity,
+                        order_type: 'automatic'
+                    })
+                });
+                
+                // Update cooldown timer
+                if (response.next_available_order) {
+                    updateOrderCooldown(itemName, response.next_available_order);
+                }
+                
+                showSuccess(`Order placed successfully for ${quantity} ${itemName}(s)`, 'ordersList');
+            } catch (error) {
+                console.error('Failed to place order:', error);
+                showError(error.message, 'ordersList');
+            }
+        }
+
+        function showSuccess(message, containerId) {
+            const container = document.getElementById(containerId);
+            const alertDiv = document.createElement('div');
+            alertDiv.className = 'alert alert-success alert-dismissible fade show';
+            alertDiv.innerHTML = `
+                ${message}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            `;
+            container.prepend(alertDiv);
+            setTimeout(() => alertDiv.remove(), 5000);
+        }
+
+        // Update inventory item display to include order button
+        function updateInventory(inventory) {
+            const inventoryList = document.getElementById('inventoryList');
+            const itemElement = document.getElementById(`inventory-${inventory.item_name}`);
+            
+            if (!itemElement) {
+                const newItem = document.createElement('div');
+                newItem.id = `inventory-${inventory.item_name}`;
+                newItem.className = 'list-group-item d-flex justify-content-between align-items-center';
+                inventoryList.appendChild(newItem);
+            }
+            
+            const element = itemElement || newItem;
+            element.innerHTML = `
+                <div class="d-flex justify-content-between align-items-center w-100">
+                    <div>
+                        <h6 class="mb-0">${inventory.item_name}</h6>
+                        <small class="text-muted">Last updated: ${new Date(inventory.timestamp).toLocaleString()}</small>
+                    </div>
+                    <div class="d-flex align-items-center">
+                        <span class="badge bg-primary rounded-pill me-3">${inventory.count}</span>
+                        <button 
+                            class="btn btn-sm btn-outline-primary" 
+                            onclick="placeOrder('${inventory.item_name}')"
+                            data-item="${inventory.item_name}">
+                            Order
+                        </button>
+                    </div>
+                </div>
+            `;
+
+            // Add animation for updates
+            element.style.animation = 'fadeIn 0.5s';
+        }
+
+        // WebSocket connection with auto-reconnect
+        function connectWebSocket() {
+            const ws = new WebSocket(`ws://${window.location.host}/ws`);
+            
+            ws.onopen = function() {
+                console.log('WebSocket connected');
+                // Reload data when connection is established
+                loadInitialInventory();
+                loadInitialOrders();
+            };
+            
+            ws.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'inventory_update') {
+                        updateInventory(data.data);
+                    } else if (data.type === 'order_update') {
+                        updateOrders(data.data);
+                    }
+                } catch (error) {
+                    console.error('Error processing WebSocket message:', error);
+                }
+            };
+
+            ws.onclose = function() {
+                console.log('WebSocket disconnected, attempting to reconnect...');
+                setTimeout(connectWebSocket, 5000);
+            };
+
+            ws.onerror = function(error) {
+                console.error('WebSocket error:', error);
+            };
+
+            return ws;
+        }
+
+        // Store order cooldown times
+        const orderCooldowns = {};
+
+        function updateOrderCooldown(itemName, nextAvailableOrder) {
+            orderCooldowns[itemName] = new Date(nextAvailableOrder);
+            updateOrderButtons();
+        }
+
+        function updateOrderButtons() {
+            const now = new Date();
+            Object.entries(orderCooldowns).forEach(([itemName, cooldownTime]) => {
+                const buttons = document.querySelectorAll(`button[data-item="${itemName}"]`);
+                buttons.forEach(button => {
+                    if (cooldownTime > now) {
+                        const minutesLeft = Math.ceil((cooldownTime - now) / (1000 * 60));
+                        button.disabled = true;
+                        button.textContent = `Wait ${minutesLeft} min`;
+                    } else {
+                        button.disabled = false;
+                        button.textContent = 'Order';
+                    }
+                });
+            });
+        }
+
+        // Update cooldowns every minute
+        setInterval(updateOrderButtons, 60000);
+
+        function showError(message, containerId) {
+            const container = document.getElementById(containerId);
+            const alertDiv = document.createElement('div');
+            alertDiv.className = 'alert alert-danger alert-dismissible fade show';
+            alertDiv.innerHTML = `
+                ${message}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            `;
+            container.prepend(alertDiv);
+            setTimeout(() => alertDiv.remove(), 5000);
+        }
+
+        // Load initial data
+        window.addEventListener('load', function() {
+            loadInitialInventory();
+            loadInitialOrders();
+            connectWebSocket();
+        });
+
+        function updateOrders(order) {
+            const ordersList = document.getElementById('ordersList');
+            
+            // Check if order card already exists
+            let orderCard = document.getElementById(`order-${order.order_id}`);
+            
+            if (!orderCard) {
+                // Create new order card
+                orderCard = document.createElement('div');
+                orderCard.id = `order-${order.order_id}`;
+                orderCard.className = 'col-md-4';
+                ordersList.prepend(orderCard);
+            }
+
+            // Update card content with animation
+            orderCard.innerHTML = `
+                <div class="card order-card order-type-${order.order_type}" style="animation: fadeIn 0.5s">
+                    <div class="card-body">
+                        <h5 class="card-title">${order.item_name}</h5>
+                        <p class="card-text">
+                            Quantity: ${order.quantity}<br>
+                            Status: <span class="status-${order.status}">${order.status}</span><br>
+                            Type: ${order.order_type}<br>
+                            Time: ${new Date(order.timestamp).toLocaleString()}
+                        </p>
+                    </div>
+                </div>
+            `;
+
+            // Add pulse animation for status changes
+            orderCard.querySelector('.card').style.animation = 'pulse 1s';
+        }
+
+        function handleCameraError() {
+            const cameraFeed = document.getElementById('cameraFeed').querySelector('img');
+            const errorDiv = document.getElementById('cameraError');
+            cameraFeed.style.display = 'none';
+            errorDiv.style.display = 'block';
+        }
+
+        function retryCamera() {
+            const cameraFeed = document.getElementById('cameraFeed').querySelector('img');
+            const errorDiv = document.getElementById('cameraError');
+            
+            // Reset the image source to trigger a new connection
+            cameraFeed.src = '/video_feed?' + new Date().getTime();
+            cameraFeed.style.display = 'block';
+            errorDiv.style.display = 'none';
+        }
+
+        // Add event listener for camera feed image load
+        document.getElementById('cameraFeed').querySelector('img').addEventListener('load', function() {
+            document.getElementById('cameraError').style.display = 'none';
+            this.style.display = 'block';
+        });
+    </script>
+</body>
+</html> 
