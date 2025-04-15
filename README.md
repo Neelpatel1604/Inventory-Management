@@ -10,6 +10,9 @@ Key Features:
 - Database integration for inventory records
 - Confidence-based detection (threshold: 0.5)
 
+## Demo
+Watch the system in action: [Inventory Management System Demo](https://youtu.be/qiGpGm3XUYU?si=9r2ulWlZxj84Y0Qb)
+
 ## Workflow
 1. **Image Acquisition**
    - System receives input through cameras/images
